@@ -1,0 +1,42 @@
+listen_addr: ":8001"
+llama_server_path: "/home/ubuntu/llamawrapper/llama.cpp/build/bin/llama-server"
+port_range_start: 8091
+max_loaded_models: 2
+health_check_sec: 30
+
+models:
+  - name: "qwen3-2b-q4"
+    model_path: "/home/ubuntu/llamawrapper/llama.cpp/models/Qwen3-VL-2B-Instruct-Q4_K_M.gguf"
+    gpu_layers: -1
+    context_size: 35000
+    threads: 4
+    batch_size: 35000
+    extra_args:
+      - "--mmproj"
+      - "/home/ubuntu/llamawrapper/llama.cpp/models/mmproj-F16.gguf"
+    aliases:
+      - "gpt-4"
+      - "gpt-4o"
+
+  - name: "qwen3-2b-bf16"
+    model_path: "/home/ubuntu/llamawrapper/llama.cpp/models/Qwen3-VL-2B-Instruct-BF16.gguf"
+    gpu_layers: -1
+    context_size: 4096
+    threads: 4
+    batch_size: 4096
+    extra_args:
+      - "--mmproj"
+      - "/home/ubuntu/llamawrapper/llama.cpp/models/mmproj-BF16.gguf"
+    aliases:
+      - "gpt-3.5-turbo"
+
+metrics:
+  enabled: true
+
+dashboard:
+  enabled: true
+
+queue:
+  enabled: true
+  max_size: 50
+  timeout_sec: 120

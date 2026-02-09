@@ -1,0 +1,102 @@
+# LlamaWrapper Gateway Configuration
+# All features are optional — only listen_addr, llama_server_path, and models are required.
+
+# ─── Core ──────────────────────────────────────────────────────────────────────
+
+listen_addr: ":8000"
+llama_server_path: "/path/to/llama.cpp/build/bin/llama-server"
+port_range_start: 8081
+max_loaded_models: 3
+health_check_sec: 30
+
+# ─── Models ────────────────────────────────────────────────────────────────────
+
+models:
+  - name: "qwen3-8b"
+    model_path: "/path/to/models/qwen3-8b-q4_k_m.gguf"
+    gpu_layers: -1          # -1 = all layers on GPU
+    context_size: 8192
+    threads: 4
+    batch_size: 512
+    aliases:                # Use these names as drop-in replacements
+      - "gpt-4"
+      - "gpt-4o"
+    timeout_sec: 60         # Per-model request timeout (0 = no timeout)
+    max_tokens: 4096        # Max tokens limit
+    # gpu_devices: "0"      # Pin to specific GPU (CUDA_VISIBLE_DEVICES)
+    # instances: 2          # Run 2 llama-server instances for load balancing
+
+  - name: "llama3.1-8b"
+    model_path: "/path/to/models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+    gpu_layers: -1
+    context_size: 8192
+    threads: 4
+    batch_size: 512
+    aliases:
+      - "gpt-3.5-turbo"
+
+  - name: "codellama-13b"
+    model_path: "/path/to/models/codellama-13b.gguf"
+    gpu_layers: 32          # Partial offload
+    context_size: 16384
+    threads: 8
+    batch_size: 1024
+    gpu_devices: "1"        # Use second GPU
+    extra_args:
+      - "--rope-freq-scale"
+      - "0.25"
+
+  # Auto-download example — model downloaded from HuggingFace on first request
+  # - name: "phi-3-mini"
+  #   gpu_layers: -1
+  #   context_size: 4096
+  #   auto_download:
+  #     repo: "microsoft/Phi-3-mini-4k-instruct-gguf"
+  #     file: "Phi-3-mini-4k-instruct-q4.gguf"
+  #     local_dir: "/path/to/models"
+
+# ─── Authentication ────────────────────────────────────────────────────────────
+
+auth:
+  enabled: false
+  keys:                     # Regular API keys
+    - "sk-your-api-key-1"
+    - "sk-your-api-key-2"
+  admin_keys:               # Keys with admin endpoint access
+    - "sk-admin-key"
+
+# ─── Rate Limiting ─────────────────────────────────────────────────────────────
+
+rate_limit:
+  enabled: false
+  requests_per_min: 60      # Per IP/key
+  burst_size: 10            # Burst allowance
+
+# ─── Request Queue ─────────────────────────────────────────────────────────────
+
+queue:
+  enabled: false
+  max_size: 100             # Max queued requests
+  timeout_sec: 300          # Max wait time in queue
+
+# ─── Response Cache ────────────────────────────────────────────────────────────
+
+cache:
+  enabled: false
+  max_entries: 1000         # Max cached responses
+  ttl_sec: 3600             # Cache TTL (only caches temperature=0 requests)
+
+# ─── Prometheus Metrics ────────────────────────────────────────────────────────
+
+metrics:
+  enabled: true             # Exposes /metrics endpoint
+
+# ─── Web Dashboard ─────────────────────────────────────────────────────────────
+
+dashboard:
+  enabled: true             # Exposes /dashboard endpoint
+
+# ─── Logging ───────────────────────────────────────────────────────────────────
+
+logging:
+  format: "text"            # "text" or "json" (JSON for production log aggregation)
