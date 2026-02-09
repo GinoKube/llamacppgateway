@@ -8,9 +8,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/llamawrapper/gateway/internal/config"
@@ -18,11 +21,23 @@ import (
 	"github.com/llamawrapper/gateway/internal/process"
 )
 
+type DownloadStatus struct {
+	ID        string `json:"id"`
+	Repo      string `json:"repo"`
+	File      string `json:"file"`
+	Status    string `json:"status"`
+	Error     string `json:"error,omitempty"`
+	StartedAt string `json:"started_at"`
+	DoneAt    string `json:"done_at,omitempty"`
+}
+
 type Handler struct {
-	manager    *process.Manager
-	metrics    *metrics.Metrics
-	reloadFunc func() error
-	startTime  time.Time
+	manager     *process.Manager
+	metrics     *metrics.Metrics
+	reloadFunc  func() error
+	startTime   time.Time
+	downloadsMu sync.Mutex
+	downloads   []*DownloadStatus
 }
 
 func NewHandler(manager *process.Manager, m *metrics.Metrics) *Handler {
@@ -67,6 +82,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/dashboard/api/schedule", h.authWrap(h.handleSchedule))
 	mux.HandleFunc("/dashboard/api/keys/manage", h.authWrap(h.handleKeyManage))
 	mux.HandleFunc("/dashboard/api/model/add", h.authWrap(h.handleModelAdd))
+	mux.HandleFunc("/dashboard/api/model/download", h.authWrap(h.handleModelDownload))
+	mux.HandleFunc("/dashboard/api/model/downloads", h.authWrap(h.serveDownloads))
+	mux.HandleFunc("/dashboard/api/model/rescan", h.authWrap(h.handleModelRescan))
 }
 
 // authWrap optionally protects dashboard endpoints with a password.
@@ -237,6 +255,7 @@ func (h *Handler) serveConfig(w http.ResponseWriter, r *http.Request) {
 			"logging_format":    cfg.Logging.Format,
 			"models_count":      len(cfg.Models),
 			"config_path":       cfg.ConfigPath(),
+			"models_dir":        cfg.ModelsDir,
 		})
 		return
 	}
@@ -898,6 +917,162 @@ func (h *Handler) handleModelAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"status": "added", "model": req.Name})
+}
+
+// --- HuggingFace Download ---
+func (h *Handler) handleModelDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Repo       string `json:"repo"`
+		File       string `json:"file"`
+		MmprojRepo string `json:"mmproj_repo"`
+		MmprojFile string `json:"mmproj_file"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Repo == "" || req.File == "" {
+		http.Error(w, "repo and file required", http.StatusBadRequest)
+		return
+	}
+
+	cfg := h.manager.GetConfig()
+	if cfg.ModelsDir == "" {
+		http.Error(w, "models_dir not configured in config.yaml", http.StatusBadRequest)
+		return
+	}
+
+	// Ensure models_dir exists
+	if err := os.MkdirAll(cfg.ModelsDir, 0755); err != nil {
+		http.Error(w, "cannot create models_dir: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	id := fmt.Sprintf("dl-%d", time.Now().UnixNano())
+	ds := &DownloadStatus{
+		ID:        id,
+		Repo:      req.Repo,
+		File:      req.File,
+		Status:    "downloading",
+		StartedAt: time.Now().Format(time.RFC3339),
+	}
+
+	h.downloadsMu.Lock()
+	h.downloads = append(h.downloads, ds)
+	h.downloadsMu.Unlock()
+
+	go func() {
+		err := runHFDownload(cfg.ModelsDir, req.Repo, req.File)
+		if err != nil {
+			h.downloadsMu.Lock()
+			ds.Status = "failed"
+			ds.Error = err.Error()
+			ds.DoneAt = time.Now().Format(time.RFC3339)
+			h.downloadsMu.Unlock()
+			return
+		}
+		// Download mmproj if specified
+		if req.MmprojRepo != "" && req.MmprojFile != "" {
+			if err := runHFDownload(cfg.ModelsDir, req.MmprojRepo, req.MmprojFile); err != nil {
+				h.downloadsMu.Lock()
+				ds.Status = "failed"
+				ds.Error = "model OK but mmproj failed: " + err.Error()
+				ds.DoneAt = time.Now().Format(time.RFC3339)
+				h.downloadsMu.Unlock()
+				return
+			}
+		}
+		h.downloadsMu.Lock()
+		ds.Status = "done"
+		ds.DoneAt = time.Now().Format(time.RFC3339)
+		h.downloadsMu.Unlock()
+
+		// Auto-reload config to pick up new model
+		if h.reloadFunc != nil {
+			if err := h.reloadFunc(); err != nil {
+				log.Printf("[dashboard] Auto-reload after download failed: %v", err)
+			}
+		}
+		if h.metrics != nil {
+			h.metrics.AddAuditEntry("download", "system", req.Repo+"/"+req.File, "downloaded via dashboard")
+		}
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "started", "id": id})
+}
+
+func runHFDownload(destDir, repo, file string) error {
+	// Method 1: Python huggingface_hub
+	pyCmd := fmt.Sprintf(
+		"from huggingface_hub import hf_hub_download; hf_hub_download('%s', '%s', local_dir='%s')",
+		strings.ReplaceAll(repo, "'", "\\'"),
+		strings.ReplaceAll(file, "'", "\\'"),
+		strings.ReplaceAll(destDir, "'", "\\'"),
+	)
+	cmd := exec.Command("python3", "-c", pyCmd)
+	if out, err := cmd.CombinedOutput(); err == nil {
+		log.Printf("[download] Downloaded %s/%s via python3 huggingface_hub", repo, file)
+		return nil
+	} else {
+		log.Printf("[download] python3 huggingface_hub failed: %v: %s", err, string(out))
+	}
+
+	// Method 2: huggingface-cli
+	cmd = exec.Command("huggingface-cli", "download", repo, file, "--local-dir", destDir)
+	if out, err := cmd.CombinedOutput(); err == nil {
+		log.Printf("[download] Downloaded %s/%s via huggingface-cli", repo, file)
+		return nil
+	} else {
+		log.Printf("[download] huggingface-cli failed: %v: %s", err, string(out))
+	}
+
+	// Method 3: curl fallback
+	url := fmt.Sprintf("https://huggingface.co/%s/resolve/main/%s", repo, file)
+	destPath := filepath.Join(destDir, file)
+	cmd = exec.Command("curl", "-L", "-o", destPath, url)
+	if out, err := cmd.CombinedOutput(); err == nil {
+		log.Printf("[download] Downloaded %s/%s via curl", repo, file)
+		return nil
+	} else {
+		log.Printf("[download] curl failed: %v: %s", err, string(out))
+		return fmt.Errorf("all download methods failed for %s/%s", repo, file)
+	}
+}
+
+func (h *Handler) serveDownloads(w http.ResponseWriter, r *http.Request) {
+	h.downloadsMu.Lock()
+	dl := make([]*DownloadStatus, len(h.downloads))
+	copy(dl, h.downloads)
+	h.downloadsMu.Unlock()
+
+	if dl == nil {
+		dl = []*DownloadStatus{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(dl)
+}
+
+func (h *Handler) handleModelRescan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.reloadFunc == nil {
+		http.Error(w, "reload not configured", http.StatusNotImplemented)
+		return
+	}
+	if err := h.reloadFunc(); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	if h.metrics != nil {
+		h.metrics.AddAuditEntry("rescan", r.RemoteAddr, "", "models_dir rescanned via dashboard")
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "rescanned"})
 }
 
 func min(a, b int) int {

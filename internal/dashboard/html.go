@@ -209,6 +209,25 @@ select,input[type=text],input[type=number]{background:var(--bg);color:var(--text
 <input type="number" id="am-gpu" placeholder="GPU layers" value="99" style="width:90px">
 <input type="number" id="am-ctx" placeholder="Context" value="4096" style="width:80px">
 <button class="btn btn-p btn-sm" onclick="addModel()">Add Model</button></div></div>
+<div class="card"><h3>Download from HuggingFace</h3>
+<div class="wf">
+<input type="text" id="hf-repo" placeholder="Repo (e.g. Qwen/Qwen3-8B-GGUF)" style="width:240px">
+<input type="text" id="hf-file" placeholder="File (e.g. qwen3-8b-q4_k_m.gguf)" style="width:240px">
+</div>
+<div class="wf">
+<label style="font-size:11px;color:var(--text-muted)"><input type="checkbox" id="hf-mmproj-check" onchange="document.getElementById('hf-mmproj-fields').style.display=this.checked?'flex':'none'"> Include mmproj</label>
+</div>
+<div class="wf" id="hf-mmproj-fields" style="display:none">
+<input type="text" id="hf-mmproj-repo" placeholder="mmproj repo" style="width:240px">
+<input type="text" id="hf-mmproj-file" placeholder="mmproj file" style="width:240px">
+</div>
+<div class="wf">
+<button class="btn btn-p btn-sm" onclick="downloadHF()">Download</button>
+<button class="btn btn-s btn-sm" onclick="rescanModels()">Rescan models_dir</button>
+<span id="hf-models-dir" style="font-size:10px;color:var(--text-muted)"></span>
+</div>
+<div id="hf-downloads" style="margin-top:8px"></div>
+</div>
 </div>
 <!-- System -->
 <div class="tc" id="t-system">
@@ -527,6 +546,38 @@ async function createKey(){try{const r=await fetch('/dashboard/api/keys/manage',
 async function addModel(){const n=$('am-name').value,p=$('am-path').value,g=parseInt($('am-gpu').value)||0,c=parseInt($('am-ctx').value)||4096;
 if(!n||!p){alert('Name and path required');return}
 try{await fetch('/dashboard/api/model/add',{method:'POST',headers:{'Content-Type':'application/json'},body:J({name:n,model_path:p,gpu_layers:g,context_size:c})});alert('Model added');await fetchAll()}catch(e){alert(e)}}
+
+async function downloadHF(){
+const repo=$('hf-repo').value.trim(),file=$('hf-file').value.trim();
+if(!repo||!file){alert('Repo and file are required');return}
+const body={repo:repo,file:file};
+if($('hf-mmproj-check').checked){
+body.mmproj_repo=$('hf-mmproj-repo').value.trim();
+body.mmproj_file=$('hf-mmproj-file').value.trim();
+}
+try{const r=await fetch('/dashboard/api/model/download',{method:'POST',headers:{'Content-Type':'application/json'},body:J(body)});
+const d=await r.json();if(d.error){alert(d.error)}else{pollDownloads()}}catch(e){alert(e)}}
+
+async function rescanModels(){
+try{await fetch('/dashboard/api/model/rescan',{method:'POST'});alert('Rescanned');await fetchAll()}catch(e){alert(e)}}
+
+async function pollDownloads(){
+try{const r=await fetch('/dashboard/api/model/downloads');const dl=await r.json();
+let h='';
+(dl||[]).forEach(d=>{
+const bc=d.status==='done'?'ready':d.status==='failed'?'failed':d.status==='downloading'?'starting':'info';
+h+='<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);font-size:11px">';
+h+='<span class="badge '+bc+'">'+d.status+'</span>';
+h+='<span><b>'+esc(d.repo)+'</b> / '+esc(d.file)+'</span>';
+if(d.error)h+='<span style="color:var(--red)">'+esc(d.error)+'</span>';
+if(d.done_at)h+='<span style="color:var(--text-muted)">'+fmtT(d.done_at)+'</span>';
+h+='</div>'});
+$('hf-downloads').innerHTML=h;
+// Show models_dir
+if(cfg.models_dir)$('hf-models-dir').textContent='models_dir: '+cfg.models_dir;
+}catch(e){}}
+
+setInterval(pollDownloads,5000);
 
 fetchAll();setInterval(fetchAll,3000);
 

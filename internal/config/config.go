@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -82,6 +84,7 @@ type Config struct {
 	PortRangeStart  int              `yaml:"port_range_start"`  // Start of port range for backends
 	MaxLoadedModels int              `yaml:"max_loaded_models"` // Max concurrent loaded models (LRU eviction)
 	HealthCheckSec  int              `yaml:"health_check_sec"`  // Health check interval in seconds
+	ModelsDir       string           `yaml:"models_dir"`        // Directory to scan for .gguf models
 	Models          []ModelConfig    `yaml:"models"`
 	Auth            AuthConfig       `yaml:"auth"`
 	RateLimit       RateLimitConfig  `yaml:"rate_limit"`
@@ -98,6 +101,16 @@ type Config struct {
 
 // ConfigPath returns the path to the loaded config file.
 func (c *Config) ConfigPath() string { return c.configPath }
+
+// expandHome replaces a leading "~/" or "~" with the user's home directory.
+func expandHome(path string) string {
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[1:])
+		}
+	}
+	return path
+}
 
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -119,8 +132,39 @@ func Load(path string) (*Config, error) {
 	if cfg.LlamaServerPath == "" {
 		return nil, fmt.Errorf("llama_server_path is required")
 	}
+
+	// Expand ~ in paths
+	cfg.LlamaServerPath = expandHome(cfg.LlamaServerPath)
+	cfg.ModelsDir = expandHome(cfg.ModelsDir)
+	for i := range cfg.Models {
+		cfg.Models[i].ModelPath = expandHome(cfg.Models[i].ModelPath)
+		for j := range cfg.Models[i].ExtraArgs {
+			cfg.Models[i].ExtraArgs[j] = expandHome(cfg.Models[i].ExtraArgs[j])
+		}
+	}
+
+	// Auto-detect models from models_dir
+	if cfg.ModelsDir != "" {
+		discovered, err := ScanModelsDir(cfg.ModelsDir)
+		if err != nil {
+			return nil, fmt.Errorf("scanning models_dir %q: %w", cfg.ModelsDir, err)
+		}
+		// Build sets of explicitly-configured names and paths to avoid conflicts
+		nameSet := make(map[string]bool)
+		pathSet := make(map[string]bool)
+		for _, m := range cfg.Models {
+			nameSet[m.Name] = true
+			pathSet[m.ModelPath] = true
+		}
+		for _, d := range discovered {
+			if !nameSet[d.Name] && !pathSet[d.ModelPath] {
+				cfg.Models = append(cfg.Models, d)
+			}
+		}
+	}
+
 	if len(cfg.Models) == 0 {
-		return nil, fmt.Errorf("at least one model must be configured")
+		return nil, fmt.Errorf("at least one model must be configured (or set models_dir)")
 	}
 
 	// Defaults for rate limiting
@@ -176,6 +220,59 @@ func Load(path string) (*Config, error) {
 	cfg.configPath = path
 
 	return cfg, nil
+}
+
+// ScanModelsDir scans a directory for .gguf files and returns auto-configured ModelConfigs.
+// mmproj files (filenames starting with "mmproj", case-insensitive) are paired automatically:
+// if exactly one mmproj file exists, it is paired with all models.
+func ScanModelsDir(dir string) ([]ModelConfig, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	var mmprojs []string
+	var modelFiles []string
+
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(strings.ToLower(name), ".gguf") {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(name), "mmproj") {
+			mmprojs = append(mmprojs, name)
+		} else {
+			modelFiles = append(modelFiles, name)
+		}
+	}
+
+	// Only auto-pair if exactly one mmproj exists
+	var mmprojPath string
+	if len(mmprojs) == 1 {
+		mmprojPath = filepath.Join(dir, mmprojs[0])
+	}
+
+	var configs []ModelConfig
+	for _, f := range modelFiles {
+		name := strings.TrimSuffix(f, filepath.Ext(f))
+		mc := ModelConfig{
+			Name:        name,
+			ModelPath:   filepath.Join(dir, f),
+			GPULayers:   -1,
+			ContextSize: 4096,
+			Threads:     4,
+			BatchSize:   512,
+			Instances:   1,
+		}
+		if mmprojPath != "" {
+			mc.ExtraArgs = []string{"--mmproj", mmprojPath}
+		}
+		configs = append(configs, mc)
+	}
+	return configs, nil
 }
 
 // ResolveAlias checks if a requested model name matches any configured alias.
