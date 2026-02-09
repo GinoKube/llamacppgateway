@@ -19,6 +19,7 @@ type ResponseCache struct {
 	entries    map[string]*entry
 	maxEntries int
 	ttl        time.Duration
+	stop       chan struct{}
 }
 
 func New(maxEntries int, ttlSec int) *ResponseCache {
@@ -26,16 +27,27 @@ func New(maxEntries int, ttlSec int) *ResponseCache {
 		entries:    make(map[string]*entry),
 		maxEntries: maxEntries,
 		ttl:        time.Duration(ttlSec) * time.Second,
+		stop:       make(chan struct{}),
 	}
 	// Periodic cleanup
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			c.cleanup()
+		for {
+			select {
+			case <-c.stop:
+				return
+			case <-ticker.C:
+				c.cleanup()
+			}
 		}
 	}()
 	return c
+}
+
+// Close stops the background cleanup goroutine.
+func (c *ResponseCache) Close() {
+	close(c.stop)
 }
 
 // CacheKey generates a deterministic key from the request body.

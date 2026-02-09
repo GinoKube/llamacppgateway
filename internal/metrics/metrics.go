@@ -474,14 +474,19 @@ func (m *Metrics) RecordRequest(model string, durationMs float64, isError bool) 
 
 	atomic.AddInt64(counter, 1)
 
-	// Histogram buckets
+	// Histogram buckets (non-cumulative: only increment the first matching bucket)
+	placed := false
 	for i, bound := range m.LatencyBuckets {
-		if durationMs <= bound {
+		if !placed && durationMs <= bound {
 			atomic.AddInt64(&m.LatencyCounts[i], 1)
+			placed = true
+			break
 		}
 	}
-	// +Inf bucket always gets incremented
-	atomic.AddInt64(&m.LatencyCounts[len(m.LatencyBuckets)], 1)
+	if !placed {
+		// Exceeds all defined buckets — goes into the +Inf overflow bucket
+		atomic.AddInt64(&m.LatencyCounts[len(m.LatencyBuckets)], 1)
+	}
 }
 
 // RecordTokens adds to the token counter.

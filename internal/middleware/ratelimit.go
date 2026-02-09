@@ -78,6 +78,8 @@ func RateLimit(cfg config.RateLimitConfig) func(http.Handler) http.Handler {
 			rl.cleanup()
 		}
 	}()
+	// Note: this goroutine runs for the lifetime of the process.
+	// Since RateLimit is only called once at startup, this is acceptable.
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

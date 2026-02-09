@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -122,13 +121,18 @@ func (h *Handler) proxyToModel(w http.ResponseWriter, r *http.Request, endpoint 
 		return
 	}
 
-	// Read the body to extract the model name
-	body, err := io.ReadAll(r.Body)
+	// Read the body to extract the model name (limit to 10MB)
+	const maxBodySize = 10 * 1024 * 1024
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to read request body")
 		return
 	}
 	r.Body.Close()
+	if len(body) >= maxBodySize {
+		writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		return
+	}
 
 	var req modelRequest
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -331,6 +335,13 @@ func (h *Handler) proxyToModel(w http.ResponseWriter, r *http.Request, endpoint 
 		// Regular response — read full body for caching
 		respBody, _ := io.ReadAll(resp.Body)
 
+		// Set cache header before writing response
+		if h.cache != nil && resp.StatusCode == http.StatusOK {
+			if _, ok := cache.CacheKey(body); ok {
+				w.Header().Set("X-Cache", "MISS")
+			}
+		}
+
 		w.WriteHeader(resp.StatusCode)
 		w.Write(respBody)
 
@@ -382,7 +393,6 @@ func (h *Handler) proxyToModel(w http.ResponseWriter, r *http.Request, endpoint 
 		if h.cache != nil && resp.StatusCode == http.StatusOK {
 			if cacheKey, ok := cache.CacheKey(body); ok {
 				h.cache.Set(cacheKey, respBody)
-				w.Header().Set("X-Cache", "MISS")
 			}
 		}
 	}
@@ -503,6 +513,3 @@ func writeError(w http.ResponseWriter, status int, message string) {
 		},
 	})
 }
-
-// Ensure bytes import is used
-var _ = bytes.NewReader

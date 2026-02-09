@@ -173,27 +173,27 @@ func main() {
 		}
 	}
 
-	// Build middleware chain (applied in reverse order)
+	// Build middleware chain (outermost wrapper listed last)
 	var handler_ http.Handler = mux
 
-	// CORS
-	handler_ = corsMiddleware(handler_)
-
-	// Structured logging (replaces old logging middleware)
-	handler_ = middleware.StructuredLogging(cfg.Logging.Format)(handler_)
-
-	// Request ID tracing
-	handler_ = middleware.RequestID(handler_)
+	// API key auth (innermost — only protects actual handlers)
+	if cfg.Auth.Enabled {
+		handler_ = middleware.Auth(cfg.Auth)(handler_)
+	}
 
 	// Rate limiting
 	if cfg.RateLimit.Enabled {
 		handler_ = middleware.RateLimit(cfg.RateLimit)(handler_)
 	}
 
-	// API key auth
-	if cfg.Auth.Enabled {
-		handler_ = middleware.Auth(cfg.Auth)(handler_)
-	}
+	// Request ID tracing
+	handler_ = middleware.RequestID(handler_)
+
+	// Structured logging (outside auth/rate-limit so rejections are logged)
+	handler_ = middleware.StructuredLogging(cfg.Logging.Format)(handler_)
+
+	// CORS (outermost — handles OPTIONS preflight before auth)
+	handler_ = corsMiddleware(handler_)
 
 	server := &http.Server{
 		Addr:         cfg.ListenAddr,

@@ -27,15 +27,18 @@ const (
 	StateFailed
 )
 
+const maxAutoRestarts = 5
+
 type Backend struct {
-	Model       config.ModelConfig
-	Port        int
-	State       BackendState
-	Process     *exec.Cmd
-	LastUsed    time.Time
-	cancel      context.CancelFunc
-	ActiveReqs  int64 // atomic: number of in-flight requests
-	instanceIdx int   // for load-balanced instances
+	Model        config.ModelConfig
+	Port         int
+	State        BackendState
+	Process      *exec.Cmd
+	LastUsed     time.Time
+	cancel       context.CancelFunc
+	ActiveReqs   int64 // atomic: number of in-flight requests
+	instanceIdx  int   // for load-balanced instances
+	restartCount int   // number of consecutive auto-restarts
 }
 
 func (b *Backend) URL() string {
@@ -111,6 +114,7 @@ type Manager struct {
 	cfg             *config.Config
 	backends        map[string]*modelBackends // model name -> backends
 	nextPort        int
+	freedPorts      []int // recycled ports available for reuse
 	maxLoaded       int
 	llamaServerPath string
 
@@ -148,6 +152,18 @@ func NewManager(cfg *config.Config) *Manager {
 	}
 	m.queueCond = sync.NewCond(&m.queueMu)
 	return m
+}
+
+// allocPort returns a recycled port or the next sequential port. Must be called with m.mu held.
+func (m *Manager) allocPort() int {
+	if len(m.freedPorts) > 0 {
+		port := m.freedPorts[len(m.freedPorts)-1]
+		m.freedPorts = m.freedPorts[:len(m.freedPorts)-1]
+		return port
+	}
+	port := m.nextPort
+	m.nextPort++
+	return port
 }
 
 // UpdateConfig replaces the running config (hot reload).
@@ -238,8 +254,7 @@ func (m *Manager) EnsureModel(ctx context.Context, modelName string) (*Backend, 
 	}
 
 	for i := 0; i < instances; i++ {
-		port := m.nextPort
-		m.nextPort++
+		port := m.allocPort()
 
 		b := &Backend{
 			Model:       *modelCfg,
@@ -327,17 +342,26 @@ func (m *Manager) startBackend(b *Backend) error {
 
 	b.Process = cmd
 
-	// Monitor process in background — auto-restart on crash
+	// Monitor process in background — auto-restart on crash (with limit)
 	go func() {
 		err := cmd.Wait()
 		m.mu.Lock()
 		if err != nil && ctx.Err() == nil {
-			log.Printf("[process] %s (instance %d) crashed: %v — will auto-restart",
-				b.Model.Name, b.instanceIdx, err)
+			b.restartCount++
+			restartCount := b.restartCount
+			log.Printf("[process] %s (instance %d) crashed: %v (restart %d/%d)",
+				b.Model.Name, b.instanceIdx, err, restartCount, maxAutoRestarts)
 			b.State = StateFailed
 			b.Process = nil
 			m.mu.Unlock()
 			m.addModelEvent(b.Model.Name, "crashed", fmt.Sprintf("instance %d: %v", b.instanceIdx, err))
+
+			if restartCount > maxAutoRestarts {
+				log.Printf("[process] %s (instance %d) exceeded max auto-restarts (%d), giving up",
+					b.Model.Name, b.instanceIdx, maxAutoRestarts)
+				m.addModelEvent(b.Model.Name, "restart_abandoned", fmt.Sprintf("instance %d: exceeded %d restarts", b.instanceIdx, maxAutoRestarts))
+				return
+			}
 
 			// Auto-restart after a brief delay
 			time.Sleep(2 * time.Second)
@@ -393,6 +417,7 @@ func (m *Manager) waitForReady(ctx context.Context, b *Backend) (*Backend, error
 			if resp.StatusCode == http.StatusOK {
 				m.mu.Lock()
 				b.State = StateReady
+				b.restartCount = 0
 				m.mu.Unlock()
 				log.Printf("[process] %s (instance %d) is ready on port %d",
 					b.Model.Name, b.instanceIdx, b.Port)
@@ -548,6 +573,7 @@ func (m *Manager) stopModel(name string) error {
 			b.cancel()
 		}
 		b.State = StateStopped
+		m.freedPorts = append(m.freedPorts, b.Port)
 	}
 
 	delete(m.backends, name)
@@ -664,9 +690,17 @@ func (m *Manager) ListConfiguredModels() []config.ModelConfig {
 // Shutdown stops all backends gracefully — waits for in-flight requests.
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	// Collect names first to avoid modifying map during iteration
+	names := make([]string, 0, len(m.backends))
+	for name := range m.backends {
+		names = append(names, name)
+	}
 
-	for name, mb := range m.backends {
+	for _, name := range names {
+		mb, ok := m.backends[name]
+		if !ok {
+			continue
+		}
 		// Wait up to 30s for in-flight requests to drain
 		deadline := time.Now().Add(30 * time.Second)
 		for _, b := range mb.backends {
@@ -679,6 +713,7 @@ func (m *Manager) Shutdown() {
 		}
 		m.stopModel(name)
 	}
+	m.mu.Unlock()
 	log.Printf("[process] All backends stopped")
 }
 
@@ -697,36 +732,56 @@ func (m *Manager) HealthCheck(ctx context.Context, intervalSec int) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Snapshot backends to check under lock, then release before HTTP calls
+			type healthTarget struct {
+				name        string
+				instanceIdx int
+				port        int
+				healthURL   string
+				backend     *Backend
+			}
+			var targets []healthTarget
+
 			m.mu.Lock()
 			for name, mb := range m.backends {
 				for _, b := range mb.backends {
 					if b.State != StateReady {
 						continue
 					}
-
-					healthURL := fmt.Sprintf("%s/health", b.URL())
-					start := time.Now()
-					resp, err := http.Get(healthURL)
-					latMs := float64(time.Since(start).Milliseconds())
-					ok := err == nil && resp != nil && resp.StatusCode == http.StatusOK
-					if !ok {
-						log.Printf("[health] %s (instance %d) failed health check, marking as failed",
-							name, b.instanceIdx)
-						b.State = StateFailed
-						m.addModelEvent(name, "health_fail", fmt.Sprintf("instance %d", b.instanceIdx))
-						if m.EventCallback != nil {
-							m.EventCallback("error", "health", name, fmt.Sprintf("health check failed on port %d", b.Port))
-						}
-					}
-					if resp != nil {
-						resp.Body.Close()
-					}
-					if m.HealthCheckCallback != nil {
-						m.HealthCheckCallback(name, b.Port, ok, latMs)
-					}
+					targets = append(targets, healthTarget{
+						name:        name,
+						instanceIdx: b.instanceIdx,
+						port:        b.Port,
+						healthURL:   fmt.Sprintf("%s/health", b.URL()),
+						backend:     b,
+					})
 				}
 			}
 			m.mu.Unlock()
+
+			for _, t := range targets {
+				start := time.Now()
+				resp, err := http.Get(t.healthURL)
+				latMs := float64(time.Since(start).Milliseconds())
+				ok := err == nil && resp != nil && resp.StatusCode == http.StatusOK
+				if resp != nil {
+					resp.Body.Close()
+				}
+				if !ok {
+					log.Printf("[health] %s (instance %d) failed health check, marking as failed",
+						t.name, t.instanceIdx)
+					m.mu.Lock()
+					t.backend.State = StateFailed
+					m.mu.Unlock()
+					m.addModelEvent(t.name, "health_fail", fmt.Sprintf("instance %d", t.instanceIdx))
+					if m.EventCallback != nil {
+						m.EventCallback("error", "health", t.name, fmt.Sprintf("health check failed on port %d", t.port))
+					}
+				}
+				if m.HealthCheckCallback != nil {
+					m.HealthCheckCallback(t.name, t.port, ok, latMs)
+				}
+			}
 		}
 	}
 }
@@ -735,14 +790,20 @@ func (m *Manager) HealthCheck(ctx context.Context, intervalSec int) {
 
 // GetGPUInfo returns current GPU memory usage.
 func (m *Manager) GetGPUInfo() []GPUInfo {
-	// Cache for 5 seconds
+	m.mu.Lock()
 	if time.Since(m.gpuInfoTime) < 5*time.Second && m.gpuInfo != nil {
-		return m.gpuInfo
+		info := m.gpuInfo
+		m.mu.Unlock()
+		return info
 	}
+	m.mu.Unlock()
 
 	info := queryGPUInfo()
+
+	m.mu.Lock()
 	m.gpuInfo = info
 	m.gpuInfoTime = time.Now()
+	m.mu.Unlock()
 	return info
 }
 
