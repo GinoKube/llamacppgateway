@@ -10,99 +10,41 @@ import (
 )
 
 type ModelConfig struct {
-	Name        string   `yaml:"name"`         // Model name used in API requests
-	ModelPath   string   `yaml:"model_path"`   // Path to GGUF file
-	GPULayers   int      `yaml:"gpu_layers"`   // Number of layers to offload to GPU (-1 = all)
-	ContextSize int      `yaml:"context_size"`  // Context window size
-	Threads     int      `yaml:"threads"`      // Number of CPU threads
-	BatchSize   int      `yaml:"batch_size"`   // Batch size for prompt processing
-	ExtraArgs   []string `yaml:"extra_args"`   // Additional llama-server arguments
-	Aliases     []string `yaml:"aliases"`      // Alternative names (e.g. "gpt-4" -> this model)
-	GPUDevices  string   `yaml:"gpu_devices"`  // CUDA_VISIBLE_DEVICES value (e.g. "0", "0,1")
-	TimeoutSec  int      `yaml:"timeout_sec"`  // Per-model request timeout in seconds (0 = no timeout)
-	MaxTokens   int      `yaml:"max_tokens"`   // Max tokens limit (0 = unlimited)
-	Instances    int      `yaml:"instances"`      // Number of llama-server instances for load balancing (default 1)
-	CostPerToken float64  `yaml:"cost_per_token"` // Override cost per token for this model (0 = use default)
-	AutoDownload *AutoDownloadConfig `yaml:"auto_download"` // Auto-download from HuggingFace
+	Name        string   `yaml:"name"`
+	ModelPath   string   `yaml:"model_path"`
+	GPULayers   int      `yaml:"gpu_layers"`
+	ContextSize int      `yaml:"context_size"`
+	Threads     int      `yaml:"threads"`
+	BatchSize   int      `yaml:"batch_size"`
+	ExtraArgs   []string `yaml:"extra_args"`
+	Aliases     []string `yaml:"aliases"`
+	GPUDevices  string   `yaml:"gpu_devices"`
+	TimeoutSec  int      `yaml:"timeout_sec"`
+	MaxTokens   int      `yaml:"max_tokens"`
+	Instances   int      `yaml:"instances"`
+	AutoDownload *AutoDownloadConfig `yaml:"auto_download"`
 }
 
 type AutoDownloadConfig struct {
-	Repo     string `yaml:"repo"`     // HuggingFace repo (e.g. "Qwen/Qwen3-8B-GGUF")
-	File     string `yaml:"file"`     // File name in repo (e.g. "qwen3-8b-q4_k_m.gguf")
-	LocalDir string `yaml:"local_dir"` // Local directory to download into
-}
-
-type AuthConfig struct {
-	Enabled bool     `yaml:"enabled"`   // Enable API key authentication
-	Keys    []string `yaml:"keys"`      // List of valid API keys
-	AdminKeys []string `yaml:"admin_keys"` // Keys with admin access
-}
-
-type RateLimitConfig struct {
-	Enabled       bool    `yaml:"enabled"`         // Enable rate limiting
-	RequestsPerMin int    `yaml:"requests_per_min"` // Max requests per minute per IP/key
-	BurstSize     int     `yaml:"burst_size"`       // Burst allowance
-}
-
-type QueueConfig struct {
-	Enabled    bool `yaml:"enabled"`     // Enable request queuing
-	MaxSize    int  `yaml:"max_size"`    // Max queue depth
-	TimeoutSec int  `yaml:"timeout_sec"` // Max wait time in queue
-}
-
-type CacheConfig struct {
-	Enabled    bool `yaml:"enabled"`     // Enable response caching
-	MaxEntries int  `yaml:"max_entries"` // Max cached responses
-	TTLSec     int  `yaml:"ttl_sec"`     // Cache entry TTL in seconds
-}
-
-type MetricsConfig struct {
-	Enabled bool `yaml:"enabled"` // Enable Prometheus metrics at /metrics
-}
-
-type DashboardConfig struct {
-	Enabled  bool   `yaml:"enabled"`  // Enable web dashboard at /dashboard
-	Password string `yaml:"password"` // Optional password to protect dashboard
-}
-
-type SLAConfig struct {
-	TargetP95Ms    float64 `yaml:"target_p95_ms"`    // P95 latency target in ms (default 2000)
-	MaxErrorPct    float64 `yaml:"max_error_pct"`     // Max error percentage (default 1.0)
-}
-
-type CostConfig struct {
-	DefaultPerToken float64 `yaml:"default_per_token"` // Default $/token (e.g. 0.000002)
-}
-
-type LoggingConfig struct {
-	Format string `yaml:"format"` // "json" or "text" (default "text")
+	Repo     string `yaml:"repo"`
+	File     string `yaml:"file"`
+	LocalDir string `yaml:"local_dir"`
 }
 
 type Config struct {
-	ListenAddr      string           `yaml:"listen_addr"`       // Gateway listen address (e.g. ":8000")
-	LlamaServerPath string           `yaml:"llama_server_path"` // Path to llama-server binary
-	PortRangeStart  int              `yaml:"port_range_start"`  // Start of port range for backends
-	MaxLoadedModels int              `yaml:"max_loaded_models"` // Max concurrent loaded models (LRU eviction)
-	HealthCheckSec  int              `yaml:"health_check_sec"`  // Health check interval in seconds
-	ModelsDir       string           `yaml:"models_dir"`        // Directory to scan for .gguf models
-	Models          []ModelConfig    `yaml:"models"`
-	Auth            AuthConfig       `yaml:"auth"`
-	RateLimit       RateLimitConfig  `yaml:"rate_limit"`
-	Queue           QueueConfig      `yaml:"queue"`
-	Cache           CacheConfig      `yaml:"cache"`
-	Metrics         MetricsConfig    `yaml:"metrics"`
-	Dashboard       DashboardConfig  `yaml:"dashboard"`
-	Logging         LoggingConfig    `yaml:"logging"`
-	SLA             SLAConfig        `yaml:"sla"`
-	Cost            CostConfig       `yaml:"cost"`
+	ListenAddr      string        `yaml:"listen_addr"`
+	LlamaServerPath string        `yaml:"llama_server_path"`
+	PortRangeStart  int           `yaml:"port_range_start"`
+	MaxLoadedModels int           `yaml:"max_loaded_models"`
+	HealthCheckSec  int           `yaml:"health_check_sec"`
+	ModelsDir       string        `yaml:"models_dir"`
+	Models          []ModelConfig `yaml:"models"`
 
-	configPath string `yaml:"-"` // Path to config file (set during Load)
+	configPath string `yaml:"-"`
 }
 
-// ConfigPath returns the path to the loaded config file.
 func (c *Config) ConfigPath() string { return c.configPath }
 
-// expandHome replaces a leading "~/" or "~" with the user's home directory.
 func expandHome(path string) string {
 	if path == "~" || strings.HasPrefix(path, "~/") {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -149,7 +91,6 @@ func Load(path string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("scanning models_dir %q: %w", cfg.ModelsDir, err)
 		}
-		// Build sets of explicitly-configured names and paths to avoid conflicts
 		nameSet := make(map[string]bool)
 		pathSet := make(map[string]bool)
 		for _, m := range cfg.Models {
@@ -165,35 +106,6 @@ func Load(path string) (*Config, error) {
 
 	if len(cfg.Models) == 0 {
 		return nil, fmt.Errorf("at least one model must be configured (or set models_dir)")
-	}
-
-	// Defaults for rate limiting
-	if cfg.RateLimit.Enabled && cfg.RateLimit.RequestsPerMin == 0 {
-		cfg.RateLimit.RequestsPerMin = 60
-	}
-	if cfg.RateLimit.Enabled && cfg.RateLimit.BurstSize == 0 {
-		cfg.RateLimit.BurstSize = 10
-	}
-
-	// Defaults for queue
-	if cfg.Queue.Enabled && cfg.Queue.MaxSize == 0 {
-		cfg.Queue.MaxSize = 100
-	}
-	if cfg.Queue.Enabled && cfg.Queue.TimeoutSec == 0 {
-		cfg.Queue.TimeoutSec = 300
-	}
-
-	// Defaults for cache
-	if cfg.Cache.Enabled && cfg.Cache.MaxEntries == 0 {
-		cfg.Cache.MaxEntries = 1000
-	}
-	if cfg.Cache.Enabled && cfg.Cache.TTLSec == 0 {
-		cfg.Cache.TTLSec = 3600
-	}
-
-	// Defaults for logging
-	if cfg.Logging.Format == "" {
-		cfg.Logging.Format = "text"
 	}
 
 	for i, m := range cfg.Models {
@@ -223,8 +135,6 @@ func Load(path string) (*Config, error) {
 }
 
 // ScanModelsDir scans a directory for .gguf files and returns auto-configured ModelConfigs.
-// mmproj files (filenames starting with "mmproj", case-insensitive) are paired automatically:
-// if exactly one mmproj file exists, it is paired with all models.
 func ScanModelsDir(dir string) ([]ModelConfig, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -249,7 +159,6 @@ func ScanModelsDir(dir string) ([]ModelConfig, error) {
 		}
 	}
 
-	// Only auto-pair if exactly one mmproj exists
 	var mmprojPath string
 	if len(mmprojs) == 1 {
 		mmprojPath = filepath.Join(dir, mmprojs[0])
@@ -276,7 +185,6 @@ func ScanModelsDir(dir string) ([]ModelConfig, error) {
 }
 
 // ResolveAlias checks if a requested model name matches any configured alias.
-// Returns the canonical model name or empty string.
 func (c *Config) ResolveAlias(requested string) string {
 	for _, m := range c.Models {
 		if m.Name == requested {
