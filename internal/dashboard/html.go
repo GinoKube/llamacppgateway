@@ -275,7 +275,7 @@ let D={},reqs=[],ts=[],keys={},sys={},cfg={},sla={},events=[],audit=[],health=[]
 const $=id=>document.getElementById(id);
 const J=v=>JSON.stringify(v);
 const fmt=n=>(n==null)?'\u2014':typeof n==='number'?n.toLocaleString():n;
-const fmtMs=n=>(n==null)?'\u2014':n<1000?Math.round(n)+'ms':(n/1000).toFixed(1)+'s';
+const fmtMs=n=>(n==null)?'\u2014':n<999.5?Math.round(n)+'ms':(n/1000).toFixed(1)+'s';
 const fmtT=t=>{try{return new Date(t).toLocaleTimeString()}catch(e){return t||'\u2014'}};
 const fmtUp=s=>{const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=Math.floor(s%60);return h>0?h+'h '+m+'m':m>0?m+'m '+ss+'s':ss+'s'};
 const lc=ms=>ms<500?'lf':ms<2000?'lm':ms<5000?'ls':'lb2';
@@ -296,7 +296,10 @@ sseConn.onopen=()=>{$('sse-status').textContent='live'};
 sseConn.onerror=()=>{$('sse-status').textContent='reconnecting...'}}catch(e){}}
 startSSE();
 
+let fetching=false;
 async function fetchAll(){
+if(fetching)return;
+fetching=true;
 try{const [dR,rR,tR,kR,sR,cR,slR,eR,aR,hR,hrR,cpR,meR,vrR,dkR,tgR,scR]=await Promise.all([
 fetch('/dashboard/api/data'),fetch('/dashboard/api/requests?limit=200'),
 fetch('/dashboard/api/timeseries'),fetch('/dashboard/api/keys'),
@@ -313,7 +316,7 @@ audit=await aR.json();health=await hR.json();hourly=await hrR.json();compare=awa
 modelEvents=await meR.json();vram=await vrR.json();disk=await dkR.json();toggles=await tgR.json();
 schedules=await scR.json();
 render();
-}catch(e){console.error('fetch',e)}}
+}catch(e){console.error('fetch',e)}finally{fetching=false}}
 
 function render(){
 const m=D.metrics||{},ms=m.model_stats||{},models=D.models||[],bk=D.backends||[],gpu=D.gpu||[];
@@ -579,7 +582,8 @@ if(cfg.models_dir)$('hf-models-dir').textContent='models_dir: '+cfg.models_dir;
 
 setInterval(pollDownloads,5000);
 
-fetchAll();setInterval(fetchAll,3000);
+fetchAll();setInterval(()=>{if(!document.hidden)fetchAll()},3000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)fetchAll()});
 
 // ============ CHAT ============
 let chatHistory=[];
@@ -593,6 +597,7 @@ if(!sel||!D.models)return;
 const cur=sel.value;
 sel.innerHTML='';
 (D.models||[]).forEach(m=>{
+if(!m.loaded)return;
 const o=document.createElement('option');o.value=m.name;o.textContent=m.name;
 if(m.aliases&&m.aliases.length)o.textContent+=' ('+m.aliases[0]+')';
 sel.appendChild(o);

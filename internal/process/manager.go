@@ -853,12 +853,59 @@ func queryMacGPUInfo() []GPUInfo {
 		return nil
 	}
 	totalMB := int(totalBytes / (1024 * 1024))
+
+	// Parse vm_stat to get active + wired memory (how Activity Monitor computes "Memory Used")
+	usedMB := 0
+	vmCmd := exec.Command("vm_stat")
+	var vmOut bytes.Buffer
+	vmCmd.Stdout = &vmOut
+	if err := vmCmd.Run(); err == nil {
+		lines := strings.Split(vmOut.String(), "\n")
+		// First line contains page size, e.g. "Mach Virtual Memory Statistics: (page size of 16384 bytes)"
+		pageSize := int64(16384) // default for Apple Silicon
+		if len(lines) > 0 {
+			if idx := strings.Index(lines[0], "page size of "); idx != -1 {
+				rest := lines[0][idx+len("page size of "):]
+				if end := strings.Index(rest, " "); end != -1 {
+					if ps, err := strconv.ParseInt(rest[:end], 10, 64); err == nil && ps > 0 {
+						pageSize = ps
+					}
+				}
+			}
+		}
+		active := parseVMStatValue(lines, "Pages active")
+		wired := parseVMStatValue(lines, "Pages wired down")
+		usedMB = int((active + wired) * pageSize / (1024 * 1024))
+	}
+
+	freeMB := totalMB - usedMB
+	if freeMB < 0 {
+		freeMB = 0
+	}
 	return []GPUInfo{{
 		Index:      0,
 		Name:       "Apple Silicon (Unified Memory)",
 		MemTotalMB: totalMB,
-		MemFreeMB:  totalMB, // can't easily determine used without vm_stat parsing
+		MemUsedMB:  usedMB,
+		MemFreeMB:  freeMB,
 	}}
+}
+
+func parseVMStatValue(lines []string, key string) int64 {
+	for _, line := range lines {
+		if strings.HasPrefix(line, key) {
+			// Lines look like: "Pages active:                  123456."
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			val := strings.TrimSpace(parts[1])
+			val = strings.TrimSuffix(val, ".")
+			n, _ := strconv.ParseInt(val, 10, 64)
+			return n
+		}
+	}
+	return 0
 }
 
 // --- Model Events ---
